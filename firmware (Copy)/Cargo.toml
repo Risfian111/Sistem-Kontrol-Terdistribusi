@@ -1,34 +1,42 @@
+# File: Cargo.toml
+
 [package]
 name = "strawberry-storage-control"
 version = "0.1.0"
+authors = ["cahyooktorisfian@gmail.com"]
 edition = "2021"
 
 [dependencies]
-# Gunakan versi yang kompatibel antar esp-idf crates
-esp-idf-sys = { version = "0.36.1", features = ["binstart"] }
-esp-idf-hal = "0.45.2"
-esp-idf-svc = "0.51.0"
+# Dependencies utama ESP-IDF dan Rust
+esp-idf-sys = { version = "0.33", features = ["binstart"] }
+esp-idf-hal = { version = "0.42.0" }
+esp-idf-svc = { version = "0.42.0", features = ["log"] }
 
 # Logging
 log = { version = "0.4", features = ["std"] }
 
-# Modbus RTU
-rmodbus = "0.12.2"
+# Pustaka untuk komunikasi Modbus RTU
+rmodbus = "0.13"
 
-# JSON
+# Pustaka untuk serialisasi data menjadi JSON
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Error handling
+# Pustaka standar Rust yang digunakan
 anyhow = "1.0"
-
-# Embedded service traits
 embedded-svc = "0.25"
 
+# Konfigurasi Target Khusus (ESP32-S3)
 [build-dependencies]
-esp_idf_build = "0.1.3"
+# Pustaka untuk membangun aplikasi ESP-IDF
+esp-idf-build = { version = "0.1.0" }
 
+# Mengatur target ESP32-S3
 [features]
-default = []
+default = ["std", "embassy-time-timg0"]
 std = ["esp-idf-svc/std"]
 experimental = ["esp-idf-svc/experimental"]
+
+# Tambahkan target spesifik untuk ESP32-S3
+# Pastikan Anda menggunakan chip yang benar (misalnya, esp32s3)
+esp32s3 = ["esp-idf-sys/esp32s3"]
