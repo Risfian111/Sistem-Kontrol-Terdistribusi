@@ -1,0 +1,34 @@
+[package]
+name = "strawberry-storage-control"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Gunakan versi yang kompatibel antar esp-idf crates
+esp-idf-sys = { version = "0.36.1", features = ["binstart"] }
+esp-idf-hal = "0.45.2"
+esp-idf-svc = "0.51.0"
+
+# Logging
+log = { version = "0.4", features = ["std"] }
+
+# Modbus RTU
+rmodbus = "0.12.2"
+
+# JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+
+# Embedded service traits
+embedded-svc = "0.25"
+
+[build-dependencies]
+esp_idf_build = "0.1.3"
+
+[features]
+default = []
+std = ["esp-idf-svc/std"]
+experimental = ["esp-idf-svc/experimental"]
