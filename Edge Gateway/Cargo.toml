@@ -1,34 +1,32 @@
+# File: Cargo.toml
+
 [package]
-name = "strawberry-storage-control"
+name = "strawberry-edge-gateway"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Gunakan versi yang kompatibel antar esp-idf crates
-esp-idf-sys = { version = "0.36.1", features = ["binstart"] }
-esp-idf-hal = "0.45.2"
-esp-idf-svc = "0.51.0"
+# Runtime Asinkron Utama
+tokio = { version = "1", features = ["full"] }
 
-# Logging
-log = { version = "0.4", features = ["std"] }
+# Penanganan Error
+anyhow = "1.0"
 
-# Modbus RTU
-rmodbus = "0.12.2"
-
-# JSON
+# Serialisasi dan Deserialisasi JSON (Untuk data dari ESP32)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Error handling
-anyhow = "1.0"
+# Klien MQTT Asinkron (Untuk ThingsBoard)
+rumqttc = "0.24" # Gunakan versi terbaru yang kompatibel
 
-# Embedded service traits
-embedded-svc = "0.25"
+# Klien InfluxDB Asinkron
+influxdb2 = "0.7" # Gunakan versi terbaru yang kompatibel
 
-[build-dependencies]
-esp_idf_build = "0.1.3"
+# Abstraksi Stream dan Future
+futures = "0.3"
 
-[features]
-default = []
-std = ["esp-idf-svc/std"]
-experimental = ["esp-idf-svc/experimental"]
+# Komunikasi Serial Asinkron
+tokio-serial = "5.4" # Digunakan untuk membaca data dari port serial ESP32
+
+# Codec untuk memproses baris data (stream) dari serial
+tokio-util = { version = "0.7", features = ["codec"] }
