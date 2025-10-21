@@ -151,5 +151,3 @@ fn read_input_register(
         None
     }
 }
-
-// Fungsi servo_duty Dihapus karena servo tidak digunakan.
