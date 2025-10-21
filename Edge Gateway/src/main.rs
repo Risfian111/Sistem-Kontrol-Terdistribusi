@@ -1,155 +1,137 @@
-use esp_idf_svc::hal as hal;
-use hal::{
-    gpio::*,
-    peripherals::Peripherals,
-    prelude::*,
-    uart::*,
-};
-use hal::uart::config::Config as UartConfig;
+use rumqttc::{MqttOptions, AsyncClient, Event, Incoming, QoS};
+use influxdb2::Client as InfluxClient;
+use influxdb2::models::DataPoint;
+use futures::stream;
+use anyhow::Result;
+use serde::Deserialize;
+use std::time::Duration;
+use tokio::time;
+use tokio::task;
+use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio_serial::SerialPortBuilderExt;
+use futures::StreamExt;
 
-use rmodbus::{client::ModbusRequest, ModbusProto};
-use serde::Serialize;
-use std::{
-    thread,
-    time::{Duration, Instant},
-};
-
-// Data yang akan dikirim, mencerminkan pemantauan penyimpanan
-#[derive(Serialize)]
-struct Sample {
-    temperature: f32,
+// Struktur data yang diharapkan dari ESP32 (Suhu dan Kelembaban Penyimpanan)
+#[derive(Debug, Deserialize)]
+struct StorageTelemetry {
+    // Diubah namanya agar lebih jelas
+    temperature: f32, 
     humidity: f32,
 }
 
-fn main() -> anyhow::Result<()> {
-    // Inisialisasi sistem dan logger
-    esp_idf_svc::sys::link_patches();
-    esp_idf_svc::log::EspLogger::initialize_default();
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Konstan untuk konfigurasi yang mudah diubah
+    const THINGSBOARD_HOST: &str = "demo.thingsboard.io";
+    const THINGSBOARD_TOKEN: &str = "vs4LHIbcEmNbVxxaB4EY"; // Ganti dengan token perangkat stroberi Anda
+    const INFLUX_URL: &str = "http://localhost:8086";
+    const INFLUX_ORG: &str = "strawberry_org"; // Organisasi InfluxDB yang disarankan
+    const INFLUX_TOKEN: &str = "wv4n_sKUgQTt-uwoVIBwOGu4pdALo_5AMlJRQfxRPrkP4ZD5OSrRwZhnAANSu5584l0zhdRSgUQbdRNsiqjm7A=="; 
+    const INFLUX_BUCKET: &str = "strawberry_storage_data"; // Bucket data stroberi
+    const SERIAL_PORT_NAME: &str = "/dev/ttyACM0"; // Pastikan ini sesuai
+    const SERIAL_BAUD_RATE: u32 = 115200;
 
-    let p = Peripherals::take().unwrap();
+    println!("🍓 Edge Gateway: Strawberry Storage Monitoring Started");
 
-    // ================= MAX485 / SHT20 (Modbus RTU) =================
-    // Diasumsikan SHT20 terhubung melalui Modbus RTU ke ESP32.
-    // Jika SHT20 terhubung I2C, bagian ini harus diganti dengan driver I2C.
-    let mut de_re = PinDriver::output(p.pins.gpio4)?; // DE/RE MAX485
-    let config = UartConfig::default().baudrate(Hertz(9600));
-    let uart = UartDriver::new(
-        p.uart1,
-        p.pins.gpio18, // TX → DI MAX485
-        p.pins.gpio17, // RX ← RO MAX485
-        Option::<AnyIOPin>::None,
-        Option::<AnyIOPin>::None,
-        &config,
-    )?;
+    // ---------------- MQTT Setup (ThingsBoard) ----------------
+    let mut mqttoptions = MqttOptions::new("strawberry-edge-gateway", THINGSBOARD_HOST, 1883);
+    mqttoptions.set_credentials(THINGSBOARD_TOKEN, "");
+    mqttoptions.set_keep_alive(Duration::from_secs(30));
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
+    println!("🔌 MQTT Client for ThingsBoard Initialized.");
 
-    // ================= L9110 FAN (Aktor Pendingin) =================
-    // Mengontrol kipas sebagai aktuator pendingin
-    let mut fan_in_a = PinDriver::output(p.pins.gpio15)?; // IN A
-    let mut fan_in_b = PinDriver::output(p.pins.gpio16)?; // IN B
-    fan_in_a.set_low()?;
-    fan_in_b.set_low()?;
-    log::info!("❄️ Fan/Cooling actuator initialized (OFF)");
+    // ---------------- InfluxDB Setup ----------------
+    let influx = InfluxClient::new(
+        INFLUX_URL,
+        INFLUX_ORG, 
+        INFLUX_TOKEN, 
+    );
+    let bucket = INFLUX_BUCKET;
+    println!("📊 InfluxDB Client Initialized. Target Bucket: {}", bucket);
 
-    // ================= LOOP KONTROL =================
-    log::info!("🍓 Strawberry Storage Monitoring & Control System Started");
+    // ---------------- Serial Setup (Asynchronous) ----------------
+    let serial = tokio_serial::new(SERIAL_PORT_NAME, SERIAL_BAUD_RATE)
+        .timeout(Duration::from_secs(2))
+        .open_native_async()
+        .expect("❌ Gagal buka serial port. Cek koneksi dan nama port.");
+    let mut reader = FramedRead::new(serial, LinesCodec::new());
+    println!("🔗 Serial Port {} @ {} baud Opened.", SERIAL_PORT_NAME, SERIAL_BAUD_RATE);
 
-    let mut fan_on_until: Option<Instant> = None;
-    
-    // Suhu batas atas ideal untuk stroberi
-    const TEMP_MAX: f32 = 8.0; 
-    // Suhu batas bawah untuk mematikan kipas setelah pendinginan
-    const TEMP_MIN: f32 = 6.0; 
-    const COOLING_DURATION_SECS: u64 = 60; // Durasi kipas menyala per siklus
-
-    loop {
-        if let (Some(t), Some(h)) = (
-            // Asumsi: 0x0001 = Suhu, 0x0002 = Kelembaban
-            read_input_register(&uart, &mut de_re, 1, 0x0001), 
-            read_input_register(&uart, &mut de_re, 1, 0x0002),
-        ) {
-            let sample = Sample { temperature: t, humidity: h };
-            // Cetak data untuk dikirim ke Edge Gateway/MQTT (sesuai kode asli)
-            println!("{}", serde_json::to_string(&sample).unwrap());
-            log::info!("✅ Data Sensor OK: Temp={:.1}°C, Hum={:.1}%", t, h);
-
-            // --- KONTROL PENDINGINAN KIPAS ---
-            if t > TEMP_MAX {
-                // Suhu terlalu tinggi, nyalakan pendingin
-                if fan_on_until.is_none() {
-                    fan_in_a.set_low()?;
-                    fan_in_b.set_high()?; // Asumsi: Konfigurasi ini menyalakan kipas
-                    fan_on_until = Some(Instant::now() + Duration::from_secs(COOLING_DURATION_SECS));
-                    log::warn!("🌡️ Suhu {:.1}°C > {}°C → Kipas ON (Pendinginan {} detik)", t, TEMP_MAX, COOLING_DURATION_SECS);
-                }
-            } else if t <= TEMP_MIN {
-                // Suhu sudah mencapai batas aman, matikan kipas segera
-                 if fan_on_until.is_some() {
-                    fan_in_a.set_low()?;
-                    fan_in_b.set_low()?;
-                    fan_on_until = None;
-                    log::info!("✅ Suhu {:.1}°C ≤ {}°C → Kipas OFF (Tujuan tercapai)", t, TEMP_MIN);
+    // ---------------- Task: MQTT Event Loop Handler ----------------
+    task::spawn(async move {
+        loop {
+            match eventloop.poll().await {
+                Ok(notification) => match &notification {
+                    Event::Incoming(Incoming::ConnAck(_)) => {
+                        println!("✅ ThingsBoard Connected!");
+                    }
+                    Event::Incoming(Incoming::Publish(p)) => {
+                        // Menerima perintah dari ThingsBoard (misal: kontrol kipas override)
+                        println!("📩 Command Received | Topic: {}, Payload: {:?}", p.topic, p.payload);
+                    }
+                    _ => {}, // Abaikan event MQTT lainnya
+                },
+                Err(e) => {
+                    eprintln!("❌ MQTT eventloop error: {:?}", e);
+                    break;
                 }
             }
-
-            // Matikan kipas jika waktu ON habis (hanya berlaku jika target belum tercapai)
-            if let Some(end_time) = fan_on_until {
-                if Instant::now() >= end_time {
-                    fan_in_a.set_low()?;
-                    fan_in_b.set_low()?;
-                    fan_on_until = None;
-                    log::info!("⏳ Kipas OFF (Waktu pendinginan {} detik habis)", COOLING_DURATION_SECS);
-                }
-            }
-            
-            // --- KONTROL KELEMBAPAN (Hanya Monitoring/Alarm) ---
-            if h < 90.0 {
-                 log::warn!("⚠️ Kelembaban {:.1}% di bawah 90%! Stroberi berpotensi cepat layu.", h);
-            }
-
-        } else {
-            log::warn!("❌ Gagal baca data sensor SHT20 (Modbus) — coba lagi...");
         }
+    });
 
-        // Delay sebelum loop berikutnya
-        thread::sleep(Duration::from_secs(30));
+    // ---------------- Loop Pembacaan dan Pengiriman Data ----------------
+    let mut data_counter: u64 = 1; 
+    
+    while let Some(line_result) = reader.next().await {
+        match line_result {
+            Ok(line) => {
+                // Mencoba deserialisasi JSON yang diterima dari ESP32
+                if let Ok(data) = serde_json::from_str::<StorageTelemetry>(&line) {
+                    println!("\n─────── 📦 Data Cycle #{} ───────", data_counter);
+                    println!("🌡️ Sensor Reading : Temp={:.1}°C, Hum={:.1}%", data.temperature, data.humidity);
+
+                    // --- 1. Kirim ke ThingsBoard (MQTT) ---
+                    let payload = format!(
+                        r#"{{"temperature": {}, "humidity": {}}}"#,
+                        data.temperature, data.humidity
+                    );
+                    match client
+                        // Topik standar ThingsBoard untuk Telemetry
+                        .publish("v1/devices/me/telemetry", QoS::AtLeastOnce, false, payload)
+                        .await
+                    {
+                        Ok(_) => println!("⬆️ Sent to ThingsBoard via MQTT."),
+                        Err(e) => eprintln!("❌ MQTT Publish Error: {:?}", e),
+                    }
+
+                    // --- 2. Simpan ke InfluxDB ---
+                    let point = DataPoint::builder("storage_telemetry")
+                        .tag("device", "strawberry-storage-unit") // Tagging data
+                        .field("temperature", data.temperature as f64)
+                        .field("humidity", data.humidity as f64)
+                        .build()?;
+
+                    if let Err(e) = influx.write(bucket, stream::iter(vec![point])).await {
+                        eprintln!("❌ InfluxDB Write Error: {:?}", e);
+                    } else {
+                        println!("💾 Data successfully stored in InfluxDB.");
+                    }
+
+                    data_counter += 1;
+                } else {
+                    // Gagal parsing JSON
+                    eprintln!("⚠️ Failed to parse JSON data: '{}'", line);
+                }
+            }
+            Err(e) => {
+                // Error saat membaca baris dari serial
+                eprintln!("❌ Serial Read Error: {:?}", e);
+            }
+        }
+        
+        // Jeda singkat antar siklus pembacaan
+        time::sleep(Duration::from_secs(1)).await;
     }
+
+    Ok(())
 }
-
-/// Fungsi baca 1 register input (function 0x04)
-/// (Fungsi ini tidak diubah karena logika Modbus tetap)
-fn read_input_register(
-    uart: &UartDriver,
-    de_re: &mut PinDriver<'_, Gpio4, Output>,
-    unit_id: u8,
-    register: u16,
-) -> Option<f32> {
-    let mut mreq = ModbusRequest::new(unit_id, ModbusProto::Rtu);
-    let mut txbuf: Vec<u8> = Vec::with_capacity(256);
-    if mreq.generate_get_inputs(register, 1, &mut txbuf).is_err() {
-        log::error!("❌ generate_get_inputs failed for 0x{:04X}", register);
-        return None;
-    }
-
-    // Transmit
-    let _ = de_re.set_high();
-    let _ = uart.write(&txbuf);
-    let _ = uart.wait_tx_done(100);
-    let _ = de_re.set_low();
-
-    // Receive
-    let mut rxbuf = vec![0u8; 512];
-    let n = match uart.read(&mut rxbuf, 500) {
-        Ok(n) if n > 0 => n,
-        _ => return None,
-    };
-
-    // Parse and return value (assuming value is scaled by 10.0)
-    let mut vals = Vec::new();
-    if mreq.parse_u16(&rxbuf[..n], &mut vals).is_ok() && !vals.is_empty() {
-        Some(vals[0] as f32 / 10.0)
-    } else {
-        None
-    }
-}
-
-// Fungsi servo_duty Dihapus karena servo tidak digunakan.
